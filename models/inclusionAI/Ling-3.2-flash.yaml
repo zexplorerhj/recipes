@@ -1,0 +1,162 @@
+meta:
+  title: "Ling-3.2-flash"
+  slug: "ling-3-2-flash"
+  provider: "inclusionAI"
+  description: "Ling-3.2-flash vision-language MoE model with block-FP8 weights, image/video understanding, tool calling, and reasoning"
+  date_added: 2026-11-05
+  date_updated: 2026-11-05
+  difficulty: advanced
+  tasks:
+    - text
+    - multimodal
+  performance_headline: "Block-FP8 weights with BF16 compute and TP8 + EP8 deployment"
+
+model:
+  model_id: "inclusionAI/Ling-3.2-flash"
+  min_vllm_version: "nightly"
+  nightly_required: true
+  architecture: moe
+  parameter_count: "~560B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+    - "--enable-expert-parallel"
+    - "--gpu-memory-utilization"
+    - "0.9"
+    - "--enable-chunked-prefill"
+    - "--compilation-config"
+    - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+    - "--enable-prefix-caching"
+
+features:
+  tool_calling:
+    description: "Enable Ling automatic tool selection and parse tool calls"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "ling3"
+  reasoning:
+    description: "Separate thinking traces from the final answer"
+    args:
+      - "--reasoning-parser"
+      - "ling3"
+
+variants:
+  default:
+    precision: fp8
+    # Estimated loading budget; allow additional memory for visual inputs and KV cache.
+    vram_minimum_gb: 689
+    tp: 8
+    description: "Serialized block-FP8 language weights with BF16 compute and vision modules."
+
+compatible_strategies:
+  - single_node_tep
+
+default_strategy: single_node_tep
+
+hardware_overrides: {}
+
+guide: |
+  ## Overview
+
+  `inclusionAI/Ling-3.2-flash` uses the
+  `BailingMoeV3VLForConditionalGeneration` architecture, combining a hybrid
+  MLA/KDA language backbone with a vision encoder and projector for image
+  and video understanding. The language backbone has 72 layers, 512 routed
+  experts with 8 active per token, and one shared expert. Language weights
+  use block-FP8 quantization with BF16 compute; the vision encoder and
+  projector use BF16.
+
+  **MTP is not supported.** This recipe uses ordinary autoregressive decoding.
+
+  ## Prerequisites
+
+  - **vLLM:** a nightly build with Ling-3.2-flash support.
+  - **Deployment:** one node with 8 GPUs, using TP8 + EP8.
+  - **Precision:** block-FP8 weights with BF16 compute.
+  - **Context length:** up to 262,144 tokens, subject to available KV memory.
+  - **Memory:** approximately 689 GB aggregate VRAM as a loading estimate;
+    allow additional capacity for visual inputs and KV cache.
+
+  ## Launching the Server
+
+  ```bash
+  vllm serve inclusionAI/Ling-3.2-flash \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --gpu-memory-utilization 0.9 \
+    --enable-chunked-prefill \
+    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser ling3 \
+    --reasoning-parser ling3
+  ```
+
+  ## Image Requests
+
+  ```python
+  import base64
+  from pathlib import Path
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  image_b64 = base64.b64encode(Path("image.png").read_bytes()).decode("ascii")
+  response = client.chat.completions.create(
+      model="inclusionAI/Ling-3.2-flash",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {
+                  "url": f"data:image/png;base64,{image_b64}"
+              }},
+              {"type": "text", "text": "Describe this image."},
+          ],
+      }],
+      temperature=0.0,
+      max_tokens=1024,
+      extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Video Requests
+
+  Reuse the client above and send an MP4 as `video_url`. The processor handles
+  frame timestamps; callers do not need to insert timestamp tokens manually.
+
+  ```python
+  video_b64 = base64.b64encode(Path("clip.mp4").read_bytes()).decode("ascii")
+  response = client.chat.completions.create(
+      model="inclusionAI/Ling-3.2-flash",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "video_url", "video_url": {
+                  "url": f"data:video/mp4;base64,{video_b64}"
+              }},
+              {"type": "text", "text": "Summarize the events in order."},
+          ],
+      }],
+      temperature=0.0,
+      max_tokens=1024,
+      extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  Add more media entries for multiple images/videos or mixed prompts, keeping
+  their intended order. For text-only requests, use ordinary string content.
+
+  ## Thinking Mode
+
+  Set `chat_template_kwargs.enable_thinking` to `True` in a request to enable
+  thinking. With `--reasoning-parser ling3`, read the reasoning trace from
+  `response.choices[0].message.reasoning` and the final answer from
+  `response.choices[0].message.content`. Increase `max_tokens` for reasoning
+  workloads while keeping the total request within the context limit.
+
+  ## References
+
+  - [Ling-3.2-flash](https://huggingface.co/inclusionAI/Ling-3.2-flash)
